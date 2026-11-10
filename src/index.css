@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+html, body, #root { height: 100%; margin: 0; background: #000; overflow: hidden; }
+body { cursor: crosshair; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; overscroll-behavior: none; }
+button { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+
+/* Phones in portrait: ask the player to turn the device (the game is landscape-only). */
+.rotate-hint { display: none; }
+@media (orientation: portrait) and (pointer: coarse) {
+  .rotate-hint {
+    position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    background: rgba(4,6,5,.94); color: #fff; font-weight: 700; letter-spacing: 4px; font-size: 14px; text-align: center; padding: 24px;
+    touch-action: none; pointer-events: auto;
+  }
+  .rotate-hint-icon {
+    width: 46px; height: 74px; border: 3px solid #fff; border-radius: 8px;
+    animation: rotatehint 2.4s ease-in-out infinite;
+  }
+}
+@keyframes rotatehint { 0%, 15% { transform: rotate(0deg); } 50%, 75% { transform: rotate(90deg); } 100% { transform: rotate(0deg); } }
+
+@keyframes hm { 0% { opacity: 1; transform: scale(1.5); } 100% { opacity: 0; transform: scale(0.85); } }
+@keyframes dmgfade { 0% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes popup { 0% { opacity: 0; transform: translateY(8px); } 10% { opacity: 1; transform: translateY(0); } 75% { opacity: 1; } 100% { opacity: 0; transform: translateY(-14px); } }
+@keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
