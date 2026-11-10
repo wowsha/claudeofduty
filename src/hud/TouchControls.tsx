@@ -24,9 +24,11 @@ interface BtnProps {
   on?: boolean;
   primary?: boolean;
   onPress: (down: boolean) => void;
+  onDrag?: (dx: number, dy: number) => void; // drag that starts on this button (used to aim while firing)
 }
 
-function Btn({ label, style, size = 62, on = false, primary = false, onPress }: BtnProps) {
+function Btn({ label, style, size = 62, on = false, primary = false, onPress, onDrag }: BtnProps) {
+  const drag = useRef<{ id: number; x: number; y: number } | null>(null);
   return (
     <button
       type="button"
@@ -47,10 +49,18 @@ function Btn({ label, style, size = 62, on = false, primary = false, onPress }: 
       onPointerDown={(e) => {
         e.stopPropagation();
         e.currentTarget.setPointerCapture(e.pointerId);
+        if (onDrag) drag.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
         onPress(true);
       }}
-      onPointerUp={(e) => { e.stopPropagation(); onPress(false); }}
-      onPointerCancel={(e) => { e.stopPropagation(); onPress(false); }}
+      onPointerMove={(e) => {
+        const d = drag.current;
+        if (!d || d.id !== e.pointerId || !onDrag) return;
+        e.stopPropagation();
+        onDrag(e.clientX - d.x, e.clientY - d.y);
+        d.x = e.clientX; d.y = e.clientY;
+      }}
+      onPointerUp={(e) => { e.stopPropagation(); drag.current = null; onPress(false); }}
+      onPointerCancel={(e) => { e.stopPropagation(); drag.current = null; onPress(false); }}
     >
       {label}
     </button>
@@ -138,7 +148,8 @@ export default function TouchControls({ game }: { game: Game }) {
 
       {/* action buttons */}
       <Btn label="FIRE" size={108} primary style={{ right: 16, bottom: 16 }} on={fire}
-        onPress={(d) => { setFire(d); game.setFire(d); }} />
+        onPress={(d) => { setFire(d); game.setFire(d); }}
+        onDrag={(dx, dy) => game.touchLook(dx, dy)} />
       <Btn label="AIM" size={74} style={{ right: 138, bottom: 24 }} on={ads}
         onPress={(d) => { if (d) { const n = !ads; setAds(n); game.setAds(n); } }} />
       <Btn label="RELOAD" style={{ right: 16, bottom: 132 }}

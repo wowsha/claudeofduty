@@ -1,6 +1,6 @@
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
-import { IS_TOUCH, type Game, type HudState } from "../game/game";
+import { IS_TOUCH, type Game, type GameMode, type HudState } from "../game/game";
 import TouchControls from "./TouchControls";
 
 const FONT = `"Bahnschrift","DIN Alternate","Roboto Condensed","Arial Narrow","Franklin Gothic Medium",Impact,sans-serif`;
@@ -112,6 +112,36 @@ function Score({ s }: { s: HudState }) {
   );
 }
 
+const MODES: [GameMode, string][] = [["tdm", "TEAM DEATHMATCH"], ["ffa", "FREE FOR ALL"], ["survival", "SURVIVAL"]];
+const MODE_INFO: Record<GameMode, string> = {
+  tdm: "Blue (you + 3 allies) vs Red (4 hostiles). First to 30 team eliminations, or the higher team after 6 minutes. Bots fight each other too, so you're never the only target.",
+  ffa: "Everyone for themselves: you vs 7 bots. First to 20 eliminations, or the most after 6 minutes.",
+  survival: "Waves of hostiles push into the plaza. Hold it as long as you can.",
+};
+
+/** Team scores + clock for team modes; kills + leader for free-for-all. */
+function MatchBar({ s }: { s: HudState }) {
+  const m = Math.max(0, Math.ceil(s.matchLeft));
+  const clock = `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}`;
+  return (
+    <div className="absolute left-1/2 -translate-x-1/2 text-center text-white" style={{ top: 66, fontFamily: FONT, ...shadow }}>
+      {s.mode === "tdm" ? (
+        <div className="flex items-center justify-center gap-6" style={{ fontWeight: 800 }}>
+          <div className="text-right" style={{ width: 130, color: "#8cc2ff" }}><div style={{ fontSize: 11, letterSpacing: 3 }}>BLUE</div><div style={{ fontSize: 30, lineHeight: 1 }}>{s.teamA}</div></div>
+          <div style={{ letterSpacing: 3 }}><div style={{ fontSize: 15 }}>{clock}</div><div style={{ fontSize: 10, opacity: 0.7 }}>FIRST TO {s.limit}</div></div>
+          <div className="text-left" style={{ width: 130, color: "#ff8a7a" }}><div style={{ fontSize: 11, letterSpacing: 3 }}>RED</div><div style={{ fontSize: 30, lineHeight: 1 }}>{s.teamB}</div></div>
+        </div>
+      ) : (
+        <div className="flex items-center justify-center gap-6" style={{ letterSpacing: 3, fontWeight: 700 }}>
+          <div style={{ fontSize: 14 }}>ELIMS <b>{s.kills}</b> / {s.limit}</div>
+          <div style={{ fontSize: 15 }}>{clock}</div>
+          <div style={{ fontSize: 12, opacity: 0.9 }}>LEADER {s.leader} · {s.leaderKills}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Hud({ game }: { game: Game }) {
   const [s, setS] = useState<HudState>({ ...game.hud });
   const [hm, setHm] = useState<{ id: number; kind: string } | null>(null);
@@ -119,6 +149,7 @@ export default function Hud({ game }: { game: Game }) {
   const [dmg, setDmg] = useState<Dmg[]>([]);
   const [dead, setDead] = useState<{ kills: number; score: number; wave: number; headshots: number } | null>(null);
   const idRef = useRef(1);
+  const [feed, setFeed] = useState<{ id: number; text: string; team: number }[]>([]);
 
   useEffect(() => {
     const iv = setInterval(() => setS({ ...game.hud }), 50);
@@ -135,6 +166,11 @@ export default function Hud({ game }: { game: Game }) {
         setTimeout(() => setDmg((p) => p.filter((x) => x.id !== id)), 1300);
       }),
       game.on("dead", (d: { kills: number; score: number; wave: number; headshots: number }) => setDead(d)),
+      game.on("feed", (d: { text: string; team: number }) => {
+        const id = idRef.current++;
+        setFeed((p) => [...p.slice(-4), { id, ...d }]);
+        setTimeout(() => setFeed((p) => p.filter((x) => x.id !== id)), 4000);
+      }),
     ];
     return () => { clearInterval(iv); offs.forEach((o) => o()); };
   }, [game]);
@@ -152,6 +188,12 @@ export default function Hud({ game }: { game: Game }) {
           <Compass yaw={s.yaw} />
           <Minimap game={game} s={s} />
           <Score s={s} />
+          {s.mode !== "survival" && <MatchBar s={s} />}
+          <div className="absolute right-8 top-[118px] flex flex-col items-end gap-1 text-right" style={{ fontFamily: FONT, ...shadow }}>
+            {feed.map((f) => (
+              <div key={f.id} style={{ fontSize: 12, letterSpacing: 1.5, fontWeight: 700, color: f.team === 0 ? "#8cc2ff" : "#ff8a7a", animation: "popup 4s ease-out forwards" }}>{f.text}</div>
+            ))}
+          </div>
           <Ammo s={s} />
           <Crosshair s={s} />
 
@@ -221,7 +263,34 @@ export default function Hud({ game }: { game: Game }) {
           <div className="mt-3 opacity-80" style={{ letterSpacing: 6, fontSize: 15 }}>{IS_TOUCH ? "TAP" : "CLICK"} TO RESUME</div>
         </div>
       )}
-      {s.status === "dead" && dead && (
+      {s.status === "dead" && s.mode !== "survival" && (
+        <div className="pointer-events-auto absolute inset-0 flex flex-col items-center justify-center text-white" style={{ background: "radial-gradient(ellipse at center, rgba(60,0,0,.35), rgba(10,0,0,.82))" }}>
+          <div style={{ fontSize: 14, letterSpacing: 10, opacity: 0.8 }}>ELIMINATED BY</div>
+          <div style={{ fontSize: 56, fontWeight: 800, letterSpacing: 6, color: "#ff4a33" }}>{s.killedBy}</div>
+          <div className="mt-6" style={{ fontSize: 15, letterSpacing: 6 }}>REDEPLOYING IN {s.respawnIn}</div>
+        </div>
+      )}
+      {s.status === "over" && s.result && (
+        <div className="pointer-events-auto absolute inset-0 flex flex-col overflow-y-auto text-white" style={{ background: "radial-gradient(ellipse at center, rgba(8,10,12,.7), rgba(4,5,6,.96))" }}>
+          <div className="my-auto flex flex-col items-center px-5 py-8 text-center">
+            <div style={{ fontSize: 13, letterSpacing: 8, opacity: 0.75 }}>MATCH OVER · {s.mode === "tdm" ? "TEAM DEATHMATCH" : "FREE FOR ALL"}</div>
+            <div style={{ fontSize: "clamp(56px,10vw,92px)", fontWeight: 900, letterSpacing: 8, lineHeight: 1, color: s.result.title === "VICTORY" ? "#fff" : "#ff4a33" }}>{s.result.title}</div>
+            <div className="mt-2" style={{ fontSize: 14, letterSpacing: 3, opacity: 0.85 }}>{s.result.sub}</div>
+            <div className="mt-5 grid w-[min(440px,88vw)] gap-y-1" style={{ fontSize: 13, letterSpacing: 2 }}>
+              {s.result.rows.map((r, i) => (
+                <div key={`${r.name}-${i}`} className="flex justify-between border-b border-white/10 py-1" style={{ fontWeight: r.you ? 800 : 500, color: s.mode === "tdm" ? (r.team === 0 ? "#8cc2ff" : "#ff8a7a") : "#fff" }}>
+                  <span>{i + 1}. {r.name}</span><span>{r.kills}</span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-6 flex gap-4">
+              <button className="cursor-pointer px-8 py-3 text-black" style={{ background: "#fff", fontWeight: 800, letterSpacing: 6 }} onClick={() => game.deploy()}>PLAY AGAIN</button>
+              <button className="cursor-pointer px-6 py-3" style={{ border: "1px solid rgba(255,255,255,.6)", fontWeight: 700, letterSpacing: 4 }} onClick={() => game.toMenu()}>MENU</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {s.status === "dead" && s.mode === "survival" && dead && (
         <div className="pointer-events-auto absolute inset-0 flex cursor-pointer flex-col items-center justify-center text-white" style={{ background: "radial-gradient(ellipse at center, rgba(60,0,0,.35), rgba(10,0,0,.82))" }} onClick={() => game.deploy()}>
           <div style={{ fontSize: 14, letterSpacing: 10, opacity: 0.8 }}>MISSION FAILED</div>
           <div style={{ fontSize: 86, fontWeight: 800, letterSpacing: 10, color: "#ff4a33", textShadow: "0 0 30px rgba(255,40,20,.45)" }}>K.I.A.</div>
@@ -253,6 +322,13 @@ function Menu({ game, s }: { game: Game; s: HudState }) {
         <button className="mt-8 cursor-pointer px-10 py-4 text-black transition hover:brightness-110" style={{ background: "#fff", fontWeight: 800, letterSpacing: 8, fontSize: 18, clipPath: "polygon(0 0,100% 0,100% 70%,94% 100%,0 100%)" }} onClick={() => game.deploy()}>
           DEPLOY
         </button>
+        <div className="mt-6 flex flex-wrap items-center gap-2" style={{ fontSize: 12, letterSpacing: 3, opacity: 0.9 }}>
+          <span className="w-[70px] opacity-70">MODE</span>
+          {MODES.map(([id, label]) => (
+            <button key={id} className="cursor-pointer px-3 py-1" style={{ border: "1px solid rgba(255,255,255,.55)", background: s.mode === id ? "#fff" : "transparent", color: s.mode === id ? "#000" : "#fff", fontWeight: 700 }} onClick={() => game.setMode(id)}>{label}</button>
+          ))}
+        </div>
+        <div className="mt-2 opacity-70" style={{ fontSize: 12, letterSpacing: 1.5, lineHeight: 1.5, maxWidth: 440 }}>{MODE_INFO[s.mode]}</div>
         <div className="mt-8 flex flex-wrap items-center gap-3" style={{ fontSize: 12, letterSpacing: 4, opacity: 0.85 }}>
           <span className="opacity-70">GRAPHICS</span>
           {["LOW", "MEDIUM", "HIGH"].map((n, i) => (

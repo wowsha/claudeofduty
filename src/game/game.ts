@@ -14,8 +14,17 @@ export const IS_TOUCH =
 
 const TOUCH_LOOK_SENS = 1.9; // touch drags are finger-distance based, so look a bit faster than mouse
 
+export type GameMode = "tdm" | "ffa" | "survival";
+export interface MatchResult { title: string; sub: string; rows: { name: string; team: number; kills: number; you: boolean }[] }
+const MATCH_TIME = 360; // seconds per team/free-for-all match
+const KILL_LIMIT: Record<GameMode, number> = { tdm: 30, ffa: 20, survival: 0 };
+const RESPAWN_TIME = 4; // seconds before the player is back in a team match
+const PLAYER_TEAM = 0; // blue in team deathmatch; the player's own team
+
 export interface HudState {
-  status: "menu" | "playing" | "paused" | "dead";
+  status: "menu" | "playing" | "paused" | "dead" | "over";
+  mode: GameMode; matchLeft: number; teamA: number; teamB: number; limit: number;
+  leader: string; leaderKills: number; respawnIn: number; killedBy: string; result: MatchResult | null;
   health: number; ammo: number; reserve: number; mag: number; reloading: boolean; reloadU: number;
   kills: number; headshots: number; score: number; wave: number; alive: number; remaining: number;
   yaw: number; ads: number; sprint: boolean; spread: number; fps: number; banner: string; bannerT: number;
@@ -70,6 +79,7 @@ export class Game {
   hud: HudState = {
     status: "menu", health: 100, ammo: MAG, reserve: MAG * 6, mag: MAG, reloading: false, reloadU: 0, kills: 0, headshots: 0, score: 0,
     wave: 0, alive: 0, remaining: 0, yaw: 0, ads: 0, sprint: false, spread: 10, fps: 60, banner: "", bannerT: 0, lowAmmo: false, crouch: false, px: 0, pz: 0, quality: 2, streak: 0,
+    mode: "tdm", matchLeft: MATCH_TIME, teamA: 0, teamB: 0, limit: KILL_LIMIT.tdm, leader: "YOU", leaderKills: 0, respawnIn: 0, killedBy: "", result: null,
   };
   private listeners: Record<string, Listener[]> = {};
 
@@ -82,6 +92,11 @@ export class Game {
   keys = new Set<string>(); mouseDown = false; mouseR = false; lookDX = 0; lookDY = 0;
   // touch input (written by the on-screen controls, read in updatePlayer)
   touchF = 0; touchS = 0; touchSprint = false; jumpQueued = false; fireTapPending = false;
+  // game modes and match state
+  mode: GameMode = "tdm";
+  teamScore: [number, number] = [0, 0];
+  matchLeft = MATCH_TIME; respawnT = 0;
+  slots: { team: number; name: string; bot: Enemy | null; respawn: number; kills: number }[] = [];
   ammo = MAG; reserve = MAG * 6; fireT = 0; bloom = 0; burstN = 0; lastShot = -10; fireBlock = 0; trigHeld = false;
   t = 0; locked = false; auto = false; manual = false; sens = 0.0019;
   kills = 0; headshots = 0; score = 0; streak = 0;
@@ -267,21 +282,43 @@ export class Game {
 
   deploy() {
     this.audio.init();
-    if (this.hud.status === "dead") this.restart();
+    // in team modes a dead player respawns on their own; survival restarts from the K.I.A. screen
+    if (this.hud.status === "dead" && this.mode !== "survival") return;
+    if (this.hud.status === "menu" || this.hud.status === "over" || this.hud.status === "dead") this.beginMatch();
     // Pointer lock is a desktop feature; touch devices don't have it.
     if (!IS_TOUCH) void Promise.resolve(this.canvas.requestPointerLock?.()).catch(() => {});
-    if (this.hud.status === "menu") { this.startWave(); }
     this.hud.status = "playing";
     this.audio.uiClick();
   }
 
-  restart() {
+  /** Start a fresh match in the selected mode. */
+  private beginMatch() {
     this.enemies.forEach((e) => this.scene.remove(e.group));
     this.enemies = [];
     this.kills = 0; this.headshots = 0; this.score = 0; this.streak = 0; this.wave = 0; this.waveActive = false;
+    this.teamScore = [0, 0]; this.matchLeft = MATCH_TIME; this.respawnT = 0;
     this.ammo = MAG; this.reserve = MAG * 6; this.health = 100;
+    this.hud.result = null; this.hud.killedBy = ""; this.hud.respawnIn = 0;
     this.resetPlayer();
-    this.startWave();
+    if (this.mode === "survival") {
+      this.slots = [];
+      this.startWave();
+    } else {
+      this.setupSlots();
+      this.banner(this.mode === "tdm" ? "TEAM DEATHMATCH" : "FREE FOR ALL", 3);
+    }
+  }
+
+  setMode(m: GameMode) {
+    if (this.hud.status !== "menu") return;
+    this.mode = m; this.hud.mode = m; this.hud.limit = KILL_LIMIT[m];
+  }
+
+  /** Back to the title screen. */
+  toMenu() {
+    this.resetTouch();
+    document.exitPointerLock?.();
+    this.hud.status = "menu";
   }
 
   private resetPlayer() {
@@ -303,12 +340,146 @@ export class Game {
 
   private banner(s: string, t = 2.5) { this.hud.banner = s; this.hud.bannerT = t; }
 
-  private spawnEnemy(p: THREE.Vector3, variant = Math.floor(Math.random() * 4)) {
+  private spawnEnemy(p: THREE.Vector3, variant = Math.floor(Math.random() * 4), team = 1, slot = -1) {
     const e = new Enemy(p, variant);
+    e.team = team; e.slot = slot;
     e.yaw = Math.atan2(this.pos.x - p.x, this.pos.z - p.z);
     this.scene.add(e.group);
     this.enemies.push(e);
     return e;
+  }
+
+  /* ------------------------------ team modes (TDM / FFA) ------------------------------ */
+  private nameOf(e: Enemy) { return e.slot >= 0 ? this.slots[e.slot].name : "HOSTILE"; }
+  private feed(text: string, team: number) { this.emit("feed", { text, team }); }
+
+  /** Bots per mode: team deathmatch = 3 allies + 4 hostiles; free-for-all = 7 loners (each on its own team). */
+  private setupSlots() {
+    const spec: [number, string][] = this.mode === "tdm"
+      ? [[0, "ALPHA"], [0, "BRAVO"], [0, "CHARLIE"], [1, "RED-1"], [1, "RED-2"], [1, "RED-3"], [1, "RED-4"]]
+      : Array.from({ length: 7 }, (_, i): [number, string] => [100 + i, `BOT-${i + 1}`]);
+    // stagger the first spawns so the bots don't all appear on the same frame
+    this.slots = spec.map(([team, name], i) => ({ team, name, bot: null, respawn: 0.4 + i * 0.35, kills: 0 }));
+  }
+
+  /** A spawn point far from the player and from every live bot. */
+  private pickSpawn(): THREE.Vector3 {
+    const pts = this.world.spawns;
+    const alive = this.enemies.filter((e) => !e.dead);
+    let best = pts[0], bestScore = -Infinity;
+    for (let i = 0; i < 10; i++) {
+      const c = pts[Math.floor(Math.random() * pts.length)];
+      let minD = Math.hypot(c.x - this.pos.x, c.z - this.pos.z);
+      for (const e of alive) minD = Math.min(minD, Math.hypot(e.pos.x - c.x, e.pos.z - c.z));
+      const score = Math.min(minD, 45) + Math.random() * 3;
+      if (score > bestScore) { bestScore = score; best = c; }
+    }
+    const p = best.clone();
+    p.x += (Math.random() - 0.5) * 2; p.z += (Math.random() - 0.5) * 2;
+    return p;
+  }
+
+  /** Nearest hostile for a bot: the player (only if alive and on another team) or another bot on another team. */
+  private targetFor(e: Enemy): { pos: THREE.Vector3; eye: THREE.Vector3; sprint: boolean; crouch: boolean; ref: Enemy | null } | null {
+    let best: { pos: THREE.Vector3; eye: THREE.Vector3; sprint: boolean; crouch: boolean; ref: Enemy | null } | null = null;
+    let bd = 90;
+    if (this.hud.status === "playing" && e.team !== PLAYER_TEAM) {
+      const d = Math.hypot(this.pos.x - e.pos.x, this.pos.z - e.pos.z);
+      if (d < bd) { bd = d; best = { pos: this.pos, eye: this.camera.position, sprint: this.sprinting, crouch: this.crouch, ref: null }; }
+    }
+    for (const o of this.enemies) {
+      if (o.dead || o === e || o.team === e.team) continue;
+      const d = Math.hypot(o.pos.x - e.pos.x, o.pos.z - e.pos.z);
+      if (d < bd) { bd = d; best = { pos: o.pos, eye: new THREE.Vector3(o.pos.x, o.pos.y + 1.6, o.pos.z), sprint: false, crouch: false, ref: o }; }
+    }
+    return best;
+  }
+
+  private botCtx(e: Enemy): EnemyCtx {
+    const t = this.targetFor(e);
+    return {
+      playerPos: t ? t.pos : e.pos, playerEye: t ? t.eye : e.pos,
+      playerSprint: t ? t.sprint : false, playerCrouch: t ? t.crouch : false,
+      targetRef: t ? t.ref : null, noTarget: !t,
+      los: this.los, collide: (p, r) => this.collideEnemy(p, r), onShoot: this.enemyShoot, time: this.t, arena: 52,
+    };
+  }
+
+  private spawnBot(i: number) {
+    const s = this.slots[i];
+    return this.spawnEnemy(this.pickSpawn(), Math.floor(Math.random() * 4), s.team, i);
+  }
+
+  /** Bot-on-bot or bot-on-player kill credit. */
+  private creditBot(killer: Enemy, victim: string) {
+    if (killer.slot >= 0) this.slots[killer.slot].kills++;
+    if (this.mode === "tdm" && killer.team < 2) this.teamScore[killer.team]++;
+    this.feed(`${this.nameOf(killer)} ▸ ${victim}`, killer.team);
+  }
+
+  private botHitBot(shooter: Enemy, victim: Enemy, dmg: number, dir: THREE.Vector3) {
+    // bot-on-bot hits land harder than on the player, so team fights resolve within a match
+    if (victim.damage(dmg * 1.6, dir.x, dir.z)) this.creditBot(shooter, this.nameOf(victim));
+  }
+
+  private matchUpdate(dt: number) {
+    // keep every slot filled: clear finished corpses, then respawn the bot after a short delay
+    for (let i = 0; i < this.slots.length; i++) {
+      const s = this.slots[i];
+      if (s.bot && s.bot.dead && s.bot.deathT > 3.5) {
+        this.scene.remove(s.bot.group);
+        this.enemies.splice(this.enemies.indexOf(s.bot), 1);
+        s.bot = null; s.respawn = 3 + Math.random() * 2;
+      }
+      if (!s.bot) {
+        s.respawn -= dt;
+        if (s.respawn <= 0) s.bot = this.spawnBot(i);
+      }
+    }
+    const alive = this.enemies.filter((e) => !e.dead).length;
+    this.hud.alive = alive; this.hud.remaining = alive;
+
+    if (this.hud.status === "playing" || this.hud.status === "dead") {
+      this.matchLeft -= dt;
+      const top = this.mode === "tdm" ? Math.max(this.teamScore[0], this.teamScore[1]) : this.kills;
+      if (top >= KILL_LIMIT[this.mode] || this.matchLeft <= 0) { this.endMatch(); return; }
+    }
+    if (this.hud.status === "dead") {
+      this.respawnT -= dt;
+      this.hud.respawnIn = Math.max(0, Math.ceil(this.respawnT));
+      if (this.respawnT <= 0) this.respawnPlayer();
+    }
+  }
+
+  private respawnPlayer() {
+    this.pos.copy(this.pickSpawn()); this.vel.set(0, 0, 0);
+    this.health = 100; this.lastHurt = -10; this.ammo = MAG; this.reserve = Math.max(this.reserve, MAG * 4);
+    this.yaw = Math.random() * 6.28; this.pitch = 0; this.eye = 1.7; this.crouch = false;
+    this.damageFx = 0; this.shake = 0; this.roll = 0; this.streak = 0;
+    this.mouseDown = false; this.mouseR = false;
+    // desktop browsers only capture the mouse from a click, so resume through the paused screen there
+    this.hud.status = IS_TOUCH ? "playing" : "paused";
+  }
+
+  private endMatch() {
+    this.hud.status = "over";
+    this.resetTouch();
+    document.exitPointerLock?.();
+    const rows = [
+      { name: "YOU", team: PLAYER_TEAM, kills: this.kills, you: true },
+      ...this.slots.map((s) => ({ name: s.name, team: s.team, kills: s.kills, you: false })),
+    ].sort((a, b) => b.kills - a.kills);
+    let title: string, sub: string;
+    if (this.mode === "tdm") {
+      const [a, b] = this.teamScore;
+      title = a > b ? "VICTORY" : a < b ? "DEFEAT" : "DRAW";
+      sub = `BLUE ${a}  —  ${b} RED`;
+    } else {
+      const rank = rows.findIndex((r) => r.you) + 1;
+      title = rank === 1 ? "VICTORY" : "DEFEAT";
+      sub = `YOU PLACED #${rank} OF ${rows.length} · ${this.kills} ELIMINATIONS`;
+    }
+    this.hud.result = { title, sub, rows };
   }
 
   private waveUpdate(dt: number) {
@@ -376,7 +547,7 @@ export class Game {
   }
 
   /* ------------------------------ ray casting ------------------------------ */
-  castRay(o: THREE.Vector3, d: THREE.Vector3, maxT: number, withEnemies = true, skip?: Enemy): Hit | null {
+  castRay(o: THREE.Vector3, d: THREE.Vector3, maxT: number, withEnemies = true, skip?: Enemy, filter?: (e: Enemy) => boolean): Hit | null {
     let best: Hit | null = null;
     let bt = maxT;
     const n = _v3;
@@ -393,7 +564,7 @@ export class Game {
     }
     if (withEnemies) {
       for (const e of this.enemies) {
-        if (e.dead || e === skip) continue;
+        if (e.dead || e === skip || (filter && !filter(e))) continue;
         const r = e.raycast(o, d, bt);
         if (r && r.t < bt) {
           bt = r.t;
@@ -472,7 +643,8 @@ export class Game {
     const mw = this.vm.muzzleWorld(this.camera, new THREE.Vector3(), 0.9);
     this.muzzleLight.position.copy(mw); this.muzzleLight.intensity = 25 * (1 - this.ads * 0.5);
 
-    const hit = this.castRay(origin, dir, 300);
+    // no friendly fire: shots pass through teammates
+    const hit = this.castRay(origin, dir, 300, true, undefined, (e) => e.team !== PLAYER_TEAM);
     const end = hit ? hit.point : origin.clone().addScaledVector(dir, 120);
     if (n % 2 === 0 || true) this.tracers.add(this.vm.muzzleWorld(this.camera, new THREE.Vector3(), 4.5), end, { speed: 420, len: 9, width: 0.02 });
     if (hit) this.resolveHit(hit, dir);
@@ -497,6 +669,10 @@ export class Game {
         this.audio.bodyFall(e.pos, this.camera.position);
         this.emit("hit", { kind: "kill" });
         this.emit("kill", { points: pts, headshot: hs, streak: this.streak, dist: Math.round(e.pos.distanceTo(this.pos)) });
+        if (this.mode !== "survival") {
+          if (this.mode === "tdm") this.teamScore[PLAYER_TEAM]++;
+          this.feed(`YOU ▸ ${this.nameOf(e)}`, PLAYER_TEAM);
+        }
       } else {
         this.score += 10;
         this.audio.hitmarker(hit.zone === "head" ? "head" : "hit");
@@ -540,27 +716,30 @@ export class Game {
   }
 
   /* ------------------------------ enemy fire ------------------------------ */
-  private enemyShoot = (e: Enemy, from: THREE.Vector3, hc: number) => {
+  private enemyShoot = (e: Enemy, from: THREE.Vector3, hc: number, ref: Enemy | null) => {
     const eye = this.camera.position;
+    // aim point: the player's eyes, or the targeted bot's chest/head
+    const aim = ref ? new THREE.Vector3(ref.pos.x, ref.pos.y + 1.6, ref.pos.z) : eye;
     this.audio.shot({ pos: from, listener: eye, kind: "enemy", vol: 0.85 });
     this.enemyFlash.position.copy(from); this.enemyFlash.intensity = 40; this.flashTimer = 0.05;
     const hit = Math.random() < hc;
-    const target = new THREE.Vector3(eye.x, eye.y - 0.35 + (Math.random() - 0.3) * 0.5, eye.z);
+    const target = new THREE.Vector3(aim.x, aim.y - 0.35 + (Math.random() - 0.3) * 0.5, aim.z);
     if (!hit) {
       const off = new THREE.Vector3(Math.random() - 0.5, (Math.random() - 0.5) * 0.7, Math.random() - 0.5).normalize().multiplyScalar(0.6 + Math.random() * 1.8);
       target.add(off);
     }
     const dir = target.clone().sub(from).normalize();
     const wh = this.castRay(from, dir, 160, false);
-    const dist = from.distanceTo(eye);
+    const dist = from.distanceTo(aim);
     const blocked = wh && wh.t < dist - 0.5;
     const end = wh ? wh.point : from.clone().addScaledVector(dir, 100);
     this.tracers.add(from, end, { speed: 260, len: 4, width: 0.01, color: [3.5, 2.6, 1.3] });
     if (wh && (wh.kind !== "ground" || blocked || !hit)) { this.impactFx(wh.point, wh.normal, wh.tag as Tag | "ground"); if (wh.t < 70) this.audio.impact(wh.tag as Tag | "ground", wh.point, eye); }
     if (hit && !blocked) {
       const dmg = 6 + Math.random() * 6;
-      this.hurtPlayer(dmg, from);
-    } else if (!blocked) {
+      if (ref) this.botHitBot(e, ref, dmg, dir);
+      else this.hurtPlayer(dmg, from, e);
+    } else if (!blocked && !ref) {
       // flyby
       const toE = eye.clone().sub(from); const proj = toE.dot(dir);
       const closest = from.clone().addScaledVector(dir, Math.max(0, proj));
@@ -569,7 +748,7 @@ export class Game {
     this.blips.push({ x: e.pos.x, z: e.pos.z, t: 2.2 });
   };
 
-  private hurtPlayer(dmg: number, from: THREE.Vector3) {
+  private hurtPlayer(dmg: number, from: THREE.Vector3, killer: Enemy | null = null) {
     if (this.hud.status !== "playing") return;
     this.health -= dmg; this.lastHurt = this.t;
     this.damageFx = Math.min(1, this.damageFx + dmg / 28);
@@ -580,13 +759,19 @@ export class Game {
     const fx = -Math.sin(this.yaw), fz = -Math.cos(this.yaw), rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);
     const ang = Math.atan2(dx * rx + dz * rz, dx * fx + dz * fz);
     this.emit("damage", { angle: ang });
-    if (this.health <= 0) this.die();
+    if (this.health <= 0) this.die(killer);
   }
 
-  private die() {
+  private die(killer: Enemy | null = null) {
     this.health = 0; this.hud.status = "dead";
     this.resetTouch();
     document.exitPointerLock?.();
+    if (this.mode !== "survival") {
+      this.respawnT = RESPAWN_TIME;
+      this.hud.respawnIn = RESPAWN_TIME;
+      this.hud.killedBy = killer ? this.nameOf(killer) : "UNKNOWN";
+      if (killer) this.creditBot(killer, "YOU");
+    }
     this.emit("dead", { kills: this.kills, score: this.score, wave: this.wave, headshots: this.headshots });
   }
 
@@ -603,19 +788,22 @@ export class Game {
 
   tick(dt: number) {
     this.t += dt;
-    const playing = this.hud.status === "playing";
+    const status = this.hud.status;
+    const playing = status === "playing";
+    const teamMode = this.mode !== "survival";
     this.world.update(this.t);
     if (playing) this.updatePlayer(dt);
-    else if (this.hud.status === "dead") this.updateDead(dt);
-    if (playing) {
-      const ctx: EnemyCtx = {
-        playerPos: this.pos, playerEye: this.camera.position, playerSprint: this.sprinting, playerCrouch: this.crouch,
-        los: this.los, collide: (p, r) => this.collideEnemy(p, r), onShoot: this.enemyShoot, time: this.t, arena: 52,
-      };
-      for (const e of this.enemies) e.update(dt, ctx);
-      this.waveUpdate(dt);
-    } else if (this.hud.status === "dead") {
+    else if (status === "dead") this.updateDead(dt);
+    // in team modes the bots keep fighting while the player is down
+    if (playing || (status === "dead" && teamMode)) {
+      for (const e of this.enemies) e.update(dt, this.botCtx(e));
+    } else if (status === "dead") {
       for (const e of this.enemies) if (e.dead) e.update(dt, { playerPos: this.pos } as EnemyCtx);
+    }
+    if (teamMode) {
+      if (status === "playing" || status === "dead") this.matchUpdate(dt);
+    } else if (playing) {
+      this.waveUpdate(dt);
     }
     this.updateFx(dt);
     this.updateCamera(dt);
@@ -806,6 +994,11 @@ export class Game {
     h.spread = sp * hpx;
     if (h.bannerT > 0) h.bannerT -= dt;
     this.mmT -= dt;
+    h.mode = this.mode; h.matchLeft = this.matchLeft; h.limit = KILL_LIMIT[this.mode];
+    h.teamA = this.teamScore[0]; h.teamB = this.teamScore[1];
+    let leader = "YOU", leaderKills = this.kills;
+    for (const sl of this.slots) if (sl.kills > leaderKills) { leaderKills = sl.kills; leader = sl.name; }
+    h.leader = leader; h.leaderKills = leaderKills;
     if (this.mmT <= 0) { this.mmT = 1 / 20; this.drawMinimap(); }
   }
 
@@ -859,7 +1052,7 @@ export class Game {
     for (const e of this.enemies) {
       if (e.dead) continue;
       const d = Math.hypot(e.pos.x - this.pos.x, e.pos.z - this.pos.z);
-      if (d < 9) { g.fillStyle = "rgba(255,60,50,0.55)"; g.beginPath(); g.arc(e.pos.x - this.pos.x, e.pos.z - this.pos.z, 1, 0, 7); g.fill(); }
+      if (d < (this.mode === "survival" ? 9 : 34)) { g.fillStyle = e.team === PLAYER_TEAM ? "rgba(90,255,140,0.7)" : "rgba(255,60,50,0.55)"; g.beginPath(); g.arc(e.pos.x - this.pos.x, e.pos.z - this.pos.z, 1, 0, 7); g.fill(); }
     }
     g.restore();
     // player arrow

@@ -6,16 +6,24 @@ A browser-based tactical first-person shooter built with Three.js, React and Vit
 
 Runs on desktop (keyboard + mouse) and mobile (touch, landscape).
 
+## Modes
+
+- **Team Deathmatch** (default): Blue (you + 3 allies) vs Red (4 hostiles). First to 30 team eliminations, or the higher team after 6 minutes. Bots shoot at whichever hostile is nearest, so the fight is spread out.
+- **Free for All**: you vs 7 bots. First to 20 eliminations, or the most after 6 minutes.
+- **Survival**: the original wave mode.
+
+Pick the mode on the title screen before deploying. Dead players respawn automatically in team modes.
+
 ## Controls
 
 | Desktop | Mobile |
 | --- | --- |
 | W A S D – move | Left thumb – floating move stick |
-| Mouse – look | Right thumb drag – look |
+| Mouse – look (works while firing) | Right thumb drag – look |
 | Shift – sprint | SPRINT button (or push stick fully forward) |
 | C / Ctrl – crouch | CROUCH button |
 | Space – jump | JUMP button |
-| Left mouse – fire | FIRE button (hold) |
+| Left mouse – fire (hold) | FIRE button (hold; drag with the same thumb to aim while firing) |
 | Right mouse – aim down sights | AIM button (tap to toggle) |
 | R – reload | RELOAD button |
 

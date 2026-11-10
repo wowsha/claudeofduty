@@ -172,12 +172,15 @@ function cloneVariant(i: number): THREE.Group {
 /* ------------------------------ enemy logic ------------------------------ */
 export type Zone = "head" | "torso" | "legs";
 export interface EnemyCtx {
-  playerPos: THREE.Vector3; // feet
+  // the bot's current target (the player or another bot). Named "player*" for historical reasons.
+  playerPos: THREE.Vector3; // target feet
   playerEye: THREE.Vector3;
   playerSprint: boolean; playerCrouch: boolean;
+  targetRef: Enemy | null; // null = the player
+  noTarget: boolean; // nothing hostile alive: stand by, don't engage
   los(a: THREE.Vector3, b: THREE.Vector3): boolean;
   collide(p: THREE.Vector3, r: number): number; // returns push distance
-  onShoot(e: Enemy, from: THREE.Vector3, hitChance: number): void;
+  onShoot(e: Enemy, from: THREE.Vector3, hitChance: number, targetRef: Enemy | null): void;
   time: number;
   arena: number;
 }
@@ -218,6 +221,8 @@ export class Enemy {
   radius = 0.36;
   id: number;
   static counter = 0;
+  team = 1; // 0 = player's team; bots on different teams are hostile to each other
+  slot = -1; // index into the match's bot slots (-1 for survival-wave bots)
 
   constructor(pos: THREE.Vector3, variant: number) {
     this.group = cloneVariant(variant);
@@ -295,7 +300,7 @@ export class Enemy {
     if (this.losT <= 0) {
       this.losT = 0.2 + Math.random() * 0.1;
       const eye = new THREE.Vector3(g.position.x, 1.6, g.position.z);
-      this.los = dist < 85 && ctx.los(eye, ctx.playerEye);
+      this.los = !ctx.noTarget && dist < 85 && ctx.los(eye, ctx.playerEye);
     }
     if (this.los) this.seen += dt; else this.seen = Math.max(0, this.seen - dt * 0.5);
 
@@ -363,7 +368,7 @@ export class Enemy {
         if (ctx.playerCrouch) hc *= 0.88;
         hc = THREE.MathUtils.clamp(hc, 0.07, 0.7);
         const from = this.muzzleWorld(new THREE.Vector3());
-        ctx.onShoot(this, from, hc);
+        ctx.onShoot(this, from, hc, ctx.targetRef);
         this.flashT = 0.05; this.fireKick = 1;
       } else if (this.burst <= 0 && this.shootCd <= 0) {
         this.burst = 3 + Math.floor(Math.random() * 5);
